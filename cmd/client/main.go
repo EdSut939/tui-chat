@@ -5,12 +5,24 @@ import (
 	"os"
 	"strings"
 
-	"charm.land/bubbles/v2/cursor"
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/gorilla/websocket"
 )
+
+const wsURL = "ws://localhost:8080/ws"
+
+func dialServer() tea.Cmd {
+	return func() tea.Msg {
+		c, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+		if err != nil {
+			return wsErrMsg(err)
+		}
+		return connectMsg{conn: c}
+	}
+}
 
 func main() {
 	p := tea.NewProgram(initialModel())
@@ -20,6 +32,7 @@ func main() {
 }
 
 type model struct {
+	wsConn        *websocket.Conn
 	viewport      viewport.Model
 	messages      []string
 	textarea      textarea.Model
@@ -27,6 +40,14 @@ type model struct {
 	receiverStyle lipgloss.Style
 	err           error
 }
+
+type connectMsg struct {
+	conn *websocket.Conn
+}
+
+type wsMsg []byte
+
+type wsErrMsg error
 
 func initialModel() model {
 	ta := textarea.New()
@@ -65,12 +86,43 @@ Type a message and press Enter to send.`)
 	}
 }
 
+func (m *model) refreshViewport() {
+	content := lipgloss.NewStyle().
+		Width(m.viewport.Width()).
+		Render(strings.Join(m.messages, "\n"))
+	m.viewport.SetContent(content)
+	m.viewport.GotoBottom()
+}
+
 func (m model) Init() tea.Cmd {
-	return textarea.Blink
+	return dialServer()
+}
+
+func readNextWsMessage(conn *websocket.Conn) tea.Cmd {
+	return func() tea.Msg {
+		_, message, err := conn.ReadMessage()
+		if err != nil {
+			return wsErrMsg(err)
+		}
+		return wsMsg(message)
+	}
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case connectMsg:
+		m.wsConn = msg.conn
+		return m, readNextWsMessage(m.wsConn)
+
+	case wsMsg:
+		m.messages = append(m.messages, m.receiverStyle.Render("Server: ")+string(msg))
+		m.refreshViewport()
+		return m, readNextWsMessage(m.wsConn)
+
+	case wsErrMsg:
+		m.err = msg
+		return m, nil
+
 	case tea.WindowSizeMsg:
 		m.viewport.SetWidth(msg.Width)
 		m.textarea.SetWidth(msg.Width)
@@ -81,16 +133,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.viewport.SetContent(lipgloss.NewStyle().Width(m.viewport.Width()).Render(strings.Join(m.messages, "\n")))
 		}
 		m.viewport.GotoBottom()
+
 	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "ctrl+c", "esc":
 			fmt.Println(m.textarea.Value())
 			return m, tea.Quit
 		case "enter":
-			m.messages = append(m.messages, m.senderStyle.Render("You: ")+m.textarea.Value())
-			m.viewport.SetContent(lipgloss.NewStyle().Width(m.viewport.Width()).Render(strings.Join(m.messages, "\n")))
+			text := m.textarea.Value()
+			if text == "" {
+				return m, nil
+			}
+
+			if m.wsConn != nil {
+				err := m.wsConn.WriteMessage(websocket.TextMessage, []byte(text))
+				if err != nil {
+					m.err = err
+					return m, tea.Quit
+				}
+			}
+
+			m.messages = append(m.messages, m.senderStyle.Render("You: ")+text)
 			m.textarea.Reset()
-			m.viewport.GotoBottom()
+			m.refreshViewport()
 			return m, nil
 		default:
 			// Send all other keypresses to the textarea.
@@ -98,12 +163,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.textarea, cmd = m.textarea.Update(msg)
 			return m, cmd
 		}
-
-	case cursor.BlinkMsg:
-		// Textarea should also process cursor blinks.
-		var cmd tea.Cmd
-		m.textarea, cmd = m.textarea.Update(msg)
-		return m, cmd
 	}
 
 	return m, nil
