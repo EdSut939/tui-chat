@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -144,9 +145,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if text == "" {
 				return m, nil
 			}
+			chatMsg := map[string]string{"type": "message", "text": text}
+			chatMsgJson, _ := json.Marshal(chatMsg) // TODO: should handle error
 
 			if m.wsConn != nil {
-				err := m.wsConn.WriteMessage(websocket.TextMessage, []byte(text))
+				err := m.wsConn.WriteMessage(websocket.TextMessage, []byte(chatMsgJson))
 				if err != nil {
 					m.err = err
 					return m, tea.Quit
